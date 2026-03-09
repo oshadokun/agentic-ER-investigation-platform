@@ -1,0 +1,8 @@
+.env
+node_modules/
+cases/
+data/case_tracker.json
+data/quality_trends.json
+*.log
+.DS_Store
+Thumbs.db
