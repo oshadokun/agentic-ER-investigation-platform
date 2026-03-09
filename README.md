@@ -1194,11 +1194,4 @@ Clean separation between data access (lib/) and business logic (agents/) means t
 ## You Are Ready to Build
 
 ```
-You placed:     .env + README.md + 5 SKILL files  (7 files)
-Claude builds:  everything else                   (~25 files)
-npm installs:   node_modules                      (automatic)
-You add:        your Anthropic API key to .env    (1 edit)
-Result:         working platform at localhost:3000
-```
-
-Start at Section 12, Step 1. Read the SKILL files. Then build.
+##Upgrades ongoing 
