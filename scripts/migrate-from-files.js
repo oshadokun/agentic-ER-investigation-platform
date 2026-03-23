@@ -298,8 +298,16 @@ async function migrateNameMap(db, caseRef) {
     }
 
     const rawJson = fs.readFileSync(nmPath, 'utf8');
-    // Validate it parses before encrypting
-    JSON.parse(rawJson);
+
+    // Validate JSON before encrypting.
+    // Do NOT propagate the parse error message — Node.js JSON.parse errors
+    // can include a snippet of the input string, which may contain real names.
+    try {
+      JSON.parse(rawJson);
+    } catch {
+      summary.name_maps.failed.push({ ref: caseRef, error: 'NameMap file contains invalid JSON — cannot import' });
+      return;
+    }
 
     const { encrypted_data, iv, auth_tag } = encrypt(rawJson);
     await db.run(
@@ -309,6 +317,7 @@ async function migrateNameMap(db, caseRef) {
     );
     summary.name_maps.imported++;
   } catch (err) {
+    // DB errors (constraint violations, etc.) do not contain PII — safe to log
     summary.name_maps.failed.push({ ref: caseRef, error: err.message });
   }
 }
