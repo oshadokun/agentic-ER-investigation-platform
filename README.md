@@ -377,58 +377,117 @@ For operational setup, key management, and backup procedures, follow OPERATOR.md
 ---
 
 And here is the architecture map:
-flowchart TD
-    UI[React UI]
-    API[Express API routes]
-    JQ[Async job queue]
+## Architecture Map
 
-    subgraph AGENTS[Agents]
-        CO[coordinator]
-        IN[intake]
-        DO[document]
-        QU[quality]
-        CM[casemanagement]
-    end
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              Browser UI (React)                              │
+│                                                                              │
+│  Dashboard • New Case Form • Case View • Document Viewer • Notifications     │
+│  - submits case intake                                                       │
+│  - starts document generation                                                │
+│  - polls async job status                                                    │
+│  - displays quality review + validation failures                             │
+│  - approves documents and downloads DOCX/PDF                                 │
+└───────────────────────────────┬──────────────────────────────────────────────┘
+                                │ HTTP / JSON
+                                ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              Express API Layer                               │
+│                                                                              │
+│  /api/cases              intake, case list, case updates                     │
+│  /api/documents          generate, approve, export/download                  │
+│  /api/jobs               async job status/result                             │
+│  /api/notifications      alerts + settings                                   │
+│  /api/policy-templates   CRUD for policy/template library                    │
+└───────────────────────────────┬──────────────────────────────────────────────┘
+                                │
+                ┌───────────────┼────────────────┬────────────────┐
+                ▼               ▼                ▼                ▼
+┌─────────────────────┐ ┌────────────────┐ ┌──────────────┐ ┌─────────────────┐
+│      Agents         │ │   Libraries    │ │ Validators   │ │   Job Queue     │
+│                     │ │                │ │              │ │                 │
+│ coordinator.js      │ │ anthropic.js   │ │ index.js     │ │ job-queue.js    │
+│ intake.js           │ │ anonymiser.js  │ │ investigation│ │ enqueue/status/ │
+│ document.js         │ │ merger.js      │ │ -report.js   │ │ result          │
+│ quality.js          │ │ encryption.js  │ │ outcome-     │ │                 │
+│ casemanagement.js   │ │ audit.js       │ │ letter.js    │ │ Single in-proc  │
+│                     │ │notifications.js│ │ invitation-  │ │ queue today,    │
+│ Orchestrate case    │ │policy-loader.js│ │ letter.js    │ │ swap point for  │
+│ logic, generation,  │ │ converter-docx │ │ interview-   │ │ persistent queue│
+│ quality review,     │ │ converter-pdf  │ │ framework.js │ │ later           │
+│ approval, deadlines │ │ settings.js    │ │ investigation│ └─────────────────┘
+│                     │ │ filestore.js   │ │ -plan.js     │
+│                     │ │ startup.js     │ │ default.js   │
+└──────────────┬──────┘ └───────┬────────┘ └──────┬───────┘
+               │                │                  │
+               └────────────────┴──────────┬───────┘
+                                           ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         AI Boundary / Safety Layer                           │
+│                                                                              │
+│  1. Input enters system with real names                                      │
+│  2. anonymiser.js strips PII and builds NameMap                              │
+│  3. Only anonymised content goes to Claude via anthropic.js                  │
+│  4. Deterministic validation runs before/after AI where required             │
+│  5. quality.js requires structured JSON output                               │
+│  6. approval flow merges real names locally only after investigator approval │
+└───────────────────────────────┬──────────────────────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           Persistence / Storage                              │
+│                                                                              │
+│  SQLite Database                                                             │
+│  - users                                                                     │
+│  - cases                                                                     │
+│  - participants                                                              │
+│  - documents                                                                 │
+│  - document_versions                                                         │
+│  - policy_templates                                                          │
+│  - document_policy_injections                                                │
+│  - audit_events                                                              │
+│  - deadlines                                                                 │
+│  - notifications                                                             │
+│  - settings                                                                  │
+│                                                                              │
+│  File Storage                                                                │
+│  - /cases/                  case folders and approved outputs                │
+│  - encrypted NameMap        stored locally, never sent to AI                 │
+│  - DOCX/PDF/HTML            written on approval/export                       │
+│                                                                              │
+│  Legacy Compatibility                                                        │
+│  - scripts/migrate-from-files.js imports old JSON/file-based cases           │
+└───────────────────────────────┬──────────────────────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           Audit / Integrity Layer                            │
+│                                                                              │
+│  audit.js writes append-only events                                          │
+│  Each event is SHA-256 hash chained                                          │
+│  verify-audit-chain.js checks continuity and tamper evidence                 │
+│                                                                              │
+│  Logged events include:                                                      │
+│  - validation failures                                                       │
+│  - quality parse failures                                                    │
+│  - overrides                                                                 │
+│  - approvals                                                                 │
+│  - exports                                                                   │
+│  - policy/template usage                                                     │
+│  - notification activity                                                     │
+└──────────────────────────────────────────────────────────────────────────────┘
+**Status**
+This platform is currently in active single-user testing by an ER consultant in a real investigative context.
+The core workflow — case intake, document generation, quality review, approval, and export — is fully operational. The database layer, encryption model, audit chain, and notification system have all passed their test suites. Documents are being generated, reviewed, and approved against live cases.
+What is still being tested in practice:
 
-    subgraph LIBS[Core libraries]
-        AN[anonymiser]
-        EN[encryption]
-        ME[merger]
-        AT[anthropic gateway]
-        PL[policyloader]
-        VA[validators]
-        AU[audit]
-        NO[notifications]
-        DX[converter-docx]
-        PX[converter-pdf]
-    end
+How well the AI-generated drafts hold up across a wider range of case types and complexity levels
+Whether the policy and template library covers enough of the real-world variation investigators encounter
+How the quality review layer performs on edge cases that the automated tests did not anticipate
+Whether the DOCX and PDF outputs meet the formatting expectations of recipients — employees, companions, trade union representatives, and legal reviewers — in actual use
 
-    subgraph DB[SQLite database]
-        T1[cases]
-        T2[documents]
-        T3[audit-events]
-        T4[notifications]
-        T5[policy-templates]
-        T6[deadlines]
-        T7[users]
-    end
+This is not a prototype. The architecture is production-grade and the security model is non-negotiable. But it has not yet been used at scale, by multiple investigators, or across a full range of case outcomes from intake to tribunal-ready closure.
+Findings from this testing phase will inform the next round of improvements before any broader rollout is considered.
 
-    SK[Skills / system prompts]
-    CL[Claude API - anonymised only]
-    CF[Case files - DOCX / PDF / NameMap.enc]
-
-    UI --> API
-    API --> JQ
-    JQ --> AGENTS
-    AGENTS --> LIBS
-    LIBS --> DB
-    LIBS --> CL
-    LIBS --> CF
-    SK -.-> AT
-
-
-
-
-
-
-The README above is one continuous block with no nested code fences — copy from the `# ER Investigation Platform` heading straight through to the end of the Summary section. The architecture map shows every layer from the browser UI down to the database, external API, and case files, with the PII boundary marked where anonymised data crosses to Claude and real names stay local.
+That is factually accurate based on the build — 72 tests passing, one real investigator, real cases, but not yet validated across the full range of ER complexity in production conditions.
