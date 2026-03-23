@@ -1,21 +1,80 @@
+'use strict';
 const { callClaude }  = require('../lib/anthropic');
 const { anonymise, anonymiseAllegations } = require('../lib/anonymiser');
-const intake         = require('./intake');
-const casemanagement = require('./casemanagement');
+const { encrypt }     = require('../lib/encryption');
+const { getDb }       = require('../lib/db');
+const intake          = require('./intake');
+const casemanagement  = require('./casemanagement');
 const fs   = require('fs-extra');
 const path = require('path');
 require('dotenv').config();
 
-async function processCase(fullCaseData) {
-  const required = ['case_type', 'allegations', 'complainant_role', 'respondent_role', 'incident_period', 'referring_party'];
-  const missing  = required.filter(f => !fullCaseData[f]);
-  if (missing.length > 0) return { status: 'VALIDATION_FAILED', missing_fields: missing, message: `Missing: ${missing.join(', ')}` };
+const CASE_CODES = {
+  'Grievance': 'GR', 'Disciplinary': 'DI', 'Bullying & Harassment': 'BH',
+  'Whistleblowing': 'WB', 'Discrimination': 'DC', 'Absence & Capability': 'AC',
+  'AWOL': 'AW', 'Counter-Allegation': 'CA', 'Complex / Multi-Party': 'CM',
+};
 
+/**
+ * Assigns the next case reference and persists case + NameMap atomically.
+ * Must be called inside a db.transaction() block.
+ *
+ * Returns the assigned case_reference string.
+ */
+async function _openCaseInTransaction(db, caseType, anonymised, nameMap, classification) {
+  const year = new Date().getFullYear();
+
+  // Atomic sequence increment
+  await db.run(
+    'INSERT INTO case_sequence (year, last_number) VALUES (?, 0) ON CONFLICT(year) DO NOTHING',
+    [year]
+  );
+  await db.run(
+    'UPDATE case_sequence SET last_number = last_number + 1 WHERE year = ?',
+    [year]
+  );
+  const seqRow = await db.get(
+    'SELECT last_number FROM case_sequence WHERE year = ?',
+    [year]
+  );
+  const caseReference = `ER-${year}-${String(seqRow.last_number).padStart(4, '0')}-${CASE_CODES[caseType] || 'XX'}`;
+
+  // Create case record
+  await casemanagement.initialiseCase({
+    case_reference:   caseReference,
+    case_type:        anonymised.case_type,
+    complexity:       classification.complexity_level,
+    escalation_level: classification.escalation_level,
+    legal_involved:   anonymised.legal_involved,
+  }, db);
+
+  // Store NameMap encrypted — never written in plaintext
+  const { encrypted_data, iv, auth_tag } = encrypt(JSON.stringify(nameMap));
+  await db.run(
+    `INSERT INTO name_maps (case_reference, encrypted_data, iv, auth_tag)
+     VALUES (?, ?, ?, ?)`,
+    [caseReference, encrypted_data, iv, auth_tag]
+  );
+
+  return caseReference;
+}
+
+async function processCase(fullCaseData) {
+  const required = [
+    'case_type', 'allegations', 'complainant_role',
+    'respondent_role', 'incident_period', 'referring_party',
+  ];
+  const missing = required.filter(f => !fullCaseData[f]);
+  if (missing.length > 0) {
+    return { status: 'VALIDATION_FAILED', missing_fields: missing, message: `Missing: ${missing.join(', ')}` };
+  }
+
+  // Anonymise all fields including referring_party (fixed PII gap)
   let anonymised, nameMap;
   try {
     ({ anonymised, nameMap } = anonymise(fullCaseData));
-    anonymised.allegations    = anonymiseAllegations(fullCaseData.allegations, nameMap);
-    anonymised.referring_party = fullCaseData.referring_party || '';
+    anonymised.allegations = anonymiseAllegations(fullCaseData.allegations, nameMap);
+    // referring_party is now '[REFERRING PARTY]' in anonymised — real value is in nameMap only
   } catch (err) {
     return { status: 'PII_DETECTED', message: err.message };
   }
@@ -41,40 +100,34 @@ Return ONLY the JSON object. No other text.
     const m = raw.match(/\{[\s\S]+\}/);
     classification = m ? JSON.parse(m[0]) : null;
   }
-  if (!classification) return { status: 'CLASSIFICATION_FAILED', message: 'Could not classify case. Please try again.' };
+  if (!classification) {
+    return { status: 'CLASSIFICATION_FAILED', message: 'Could not classify case. Please try again.' };
+  }
 
-  const intakeResult = await intake.openCase({
+  // Atomically: assign reference + create case row + store encrypted NameMap
+  const db = getDb();
+  const caseReference = await db.transaction(dbTx =>
+    _openCaseInTransaction(dbTx, fullCaseData.case_type, anonymised, nameMap, classification)
+  );
+
+  // Non-transactional: folder structure + Claude call for acknowledgement letters
+  const intakeInput = {
     ...anonymised,
     escalation_level: classification.escalation_level,
     complexity:       classification.complexity_level,
-    case_open_date:   new Date().toISOString().split('T')[0]
-  });
+    case_open_date:   new Date().toISOString().split('T')[0],
+  };
+  const intakeResult = await intake.openCase(caseReference, intakeInput);
 
-  const caseReference = intakeResult.case_reference;
-
-  await casemanagement.initialiseCase({
-    case_reference:   caseReference,
-    case_type:        anonymised.case_type,
-    complexity:       classification.complexity_level,
-    timeline_weeks:   classification.timeline_weeks,
-    escalation_level: classification.escalation_level,
-    legal_involved:   anonymised.legal_involved
-  });
-
-  const casesPath = process.env.CASE_FILES_PATH || './cases';
-
-  // Store nameMap locally — never sent to the API
-  const nameMapPath = path.join(casesPath, caseReference, '00_CASE_LOG', `${caseReference}_NameMap.json`);
-  await fs.writeFile(nameMapPath, JSON.stringify(nameMap, null, 2));
-
-  // Store full anonymised case data for later document generation
+  // Store full anonymised case data (no PII) as a local file for document generation
+  const casesPath   = process.env.CASE_FILES_PATH || './cases';
   const caseDataFull = {
     ...anonymised,
     case_reference:   caseReference,
     complexity:       classification.complexity_level,
     escalation_level: classification.escalation_level,
     case_open_date:   new Date().toISOString().split('T')[0],
-    classification
+    classification,
   };
   const caseDataPath = path.join(casesPath, caseReference, '00_CASE_LOG', `${caseReference}_CaseData.json`);
   await fs.writeFile(caseDataPath, JSON.stringify(caseDataFull, null, 2));
@@ -91,12 +144,12 @@ Return ONLY the JSON object. No other text.
         { phase: 1, name: 'Case Opening',  documents: ['Investigation Plan', 'Invitation Letters'] },
         { phase: 2, name: 'Investigation', documents: ['Interview Frameworks', 'Evidence Log', 'Case Chronology'] },
         { phase: 3, name: 'Reporting',     documents: ['Investigation Report', 'Case Summary'] },
-        { phase: 4, name: 'Outcome',       documents: ['Outcome Letter A', 'Outcome Letter B'] }
-      ]
+        { phase: 4, name: 'Outcome',       documents: ['Outcome Letter A', 'Outcome Letter B'] },
+      ],
     },
     message: classification.escalation_level !== 'None'
       ? `⚠ Case opened with ${classification.escalation_level} escalation: ${classification.escalation_reasons.join(', ')}`
-      : `Case ${caseReference} opened successfully.`
+      : `Case ${caseReference} opened successfully.`,
   };
 }
 

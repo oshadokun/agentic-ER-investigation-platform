@@ -1,9 +1,10 @@
+'use strict';
 const express       = require('express');
 const router        = express.Router();
 const documentAgent = require('../agents/document');
 const qualityAgent  = require('../agents/quality');
-const fs   = require('fs-extra');
-const path = require('path');
+const { getDb }     = require('../lib/db');
+const { decrypt }   = require('../lib/encryption');
 require('dotenv').config();
 
 router.post('/generate', async (req, res) => {
@@ -19,7 +20,7 @@ router.post('/generate', async (req, res) => {
         escalation_level: anonymisedCase.escalation_required ? 'Advisory' : 'None',
         legal_involved:   anonymisedCase.legal_involved,
         allegations:      anonymisedCase.allegations,
-        document_content: result.draft_text
+        document_content: result.draft_text,
       });
     }
     res.json(result);
@@ -29,11 +30,17 @@ router.post('/generate', async (req, res) => {
 router.post('/approve', async (req, res) => {
   try {
     const { caseReference, documentType, draftText } = req.body;
-    const nameMapPath = path.join(
-      process.env.CASE_FILES_PATH || './cases',
-      caseReference, '00_CASE_LOG', `${caseReference}_NameMap.json`
+
+    const db  = getDb();
+    const row = await db.get(
+      'SELECT encrypted_data, iv, auth_tag FROM name_maps WHERE case_reference = ?',
+      [caseReference]
     );
-    const nameMap = JSON.parse(await fs.readFile(nameMapPath, 'utf8'));
+    if (!row) {
+      return res.status(404).json({ status: 'NOT_FOUND', message: 'NameMap not found for this case' });
+    }
+    const nameMap = JSON.parse(decrypt(row));
+
     res.json(await documentAgent.approveDocument(caseReference, documentType, draftText, nameMap));
   } catch (e) { res.status(500).json({ status: 'ERROR', message: e.message }); }
 });
