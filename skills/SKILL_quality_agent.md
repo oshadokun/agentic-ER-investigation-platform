@@ -649,79 +649,61 @@ Zero PII detected = PASS — proceed to quality report
 
 ## Quality Report — Output Format
 
-After all five stages are complete, the Quality Agent produces a single quality report. This is what the consultant receives alongside the document.
+**CRITICAL: The Quality Agent MUST output ONLY valid JSON. No preamble, no explanation, no markdown fences. The entire response is a single JSON object conforming to the schema below.**
 
+After all five stages are complete, output exactly this JSON structure (replace all bracketed placeholders with real values):
+
+```json
+{
+  "case_reference": "string",
+  "document_type": "string",
+  "case_type": "string",
+  "complexity": "string",
+  "review_date": "YYYY-MM-DD",
+  "overall_result": "PASS | PASS_WITH_MANDATORY_CORRECTIONS | FAIL | AUTOMATIC_FAIL",
+  "overall_score": 0,
+  "stages": {
+    "completeness":    { "score": 0, "passed": true },
+    "structure":       { "score": 0, "passed": true },
+    "language_tone":   { "score": 0, "passed": true },
+    "legal_compliance":{ "score": 0, "passed": true },
+    "anonymisation":   { "passed": true }
+  },
+  "mandatory_corrections": [
+    {
+      "id": "MC-01",
+      "stage": 1,
+      "severity": "HIGH",
+      "issue": "Description of the problem",
+      "location": "Section / paragraph reference",
+      "required_action": "Exactly what must be changed"
+    }
+  ],
+  "advisory_improvements": [
+    {
+      "id": "AI-01",
+      "stage": 1,
+      "severity": "LOW",
+      "observation": "What could be improved",
+      "location": "Location reference",
+      "suggestion": "What to consider"
+    }
+  ],
+  "escalation_flags": [
+    "Flag description and recommended action"
+  ],
+  "summary": "2–3 sentence plain English summary of the review outcome, highlighting the most important issue(s) for the consultant to address, or confirming the document is ready for review."
+}
 ```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-QUALITY REVIEW REPORT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Case Reference:    [CASE REFERENCE]
-Document Type:     [DOCUMENT TYPE]
-Case Type:         [CASE TYPE]
-Complexity:        [LEVEL]
-Review Date:       [DATE]
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-OVERALL RESULT: [PASS / PASS WITH MANDATORY CORRECTIONS / FAIL]
-
-STAGE SCORES:
-  Stage 1 — Completeness:       [XX/100]  [PASS / FAIL]
-  Stage 2 — Structure:          [XX/100]  [PASS / FAIL]
-  Stage 3 — Language & Tone:    [XX/100]  [PASS / FAIL]
-  Stage 4 — Legal Compliance:   [XX/100]  [PASS / FAIL]
-  Stage 5 — Anonymisation:      [PASS / FAIL]
-
-OVERALL SCORE: [XX/100]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-MANDATORY CORRECTIONS  (must be resolved before approval)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-[MC-01]  Stage: [X]  Severity: HIGH
-         Issue: [Description of the problem]
-         Location: [Section / paragraph reference]
-         Required action: [Exactly what must be changed]
-
-[MC-02]  Stage: [X]  Severity: HIGH
-         Issue: [Description]
-         Location: [Location]
-         Required action: [Action]
-
-[If no mandatory corrections: "No mandatory corrections required."]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ADVISORY IMPROVEMENTS  (recommended — consultant's discretion)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-[AI-01]  Stage: [X]  Severity: LOW
-         Observation: [What could be improved]
-         Location: [Location]
-         Suggestion: [What to consider]
-
-[If no advisory items: "No advisory improvements identified."]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ESCALATION FLAGS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-[If escalation flags identified during review:]
-⚠ [Flag description and recommended action]
-
-[If none: "No additional escalation flags identified during quality review."]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-QUALITY AGENT SUMMARY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-[2–3 sentence plain English summary of the review outcome, 
-highlighting the most important issue(s) for the consultant 
-to address, or confirming the document is ready for review.]
-
-This quality review was conducted automatically. It does not 
-replace the consultant's professional judgment. The consultant 
-must read and approve the full document before it is issued.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
+Rules for the JSON output:
+- `overall_result` must be exactly one of: `"PASS"`, `"PASS_WITH_MANDATORY_CORRECTIONS"`, `"FAIL"`, `"AUTOMATIC_FAIL"`
+- `overall_score` is the integer average of the four stage scores (Stage 5 is pass/fail only and does not contribute to the score). If Stage 5 fails, set `overall_result` to `"AUTOMATIC_FAIL"` regardless of score.
+- `mandatory_corrections` is an empty array `[]` if none — never omit the field.
+- `advisory_improvements` is an empty array `[]` if none — never omit the field.
+- `escalation_flags` is an empty array `[]` if none — never omit the field.
+- All string values must be properly JSON-escaped.
+- Do NOT output anything before or after the JSON object.
 
 ---
 

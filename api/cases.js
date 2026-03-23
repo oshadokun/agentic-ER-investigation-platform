@@ -1,13 +1,35 @@
+'use strict';
 const express        = require('express');
 const router         = express.Router();
 const coordinator    = require('../agents/coordinator');
 const casemanagement = require('../agents/casemanagement');
 const { readLog }    = require('../lib/logger');
+const queue          = require('../lib/job-queue');
 const fs   = require('fs-extra');
 const path = require('path');
 require('dotenv').config();
 
-router.post('/',           async (req, res) => { try { res.json(await coordinator.processCase(req.body)); } catch (e) { res.status(500).json({ status: 'ERROR', message: e.message }); } });
+/**
+ * POST /api/cases
+ * Enqueues a case.intake job and returns { job_id } immediately.
+ * The job covers: validation, anonymisation, Claude classification,
+ * atomic DB transaction (sequence + case + nameMap), and intake agent
+ * (folder creation + Claude acknowledgement letters).
+ * Poll GET /api/jobs/:job_id for status and result.
+ */
+router.post('/', (req, res) => {
+  try {
+    const job_id = queue.enqueue(
+      'case.intake',
+      req.body,
+      (payload) => coordinator.processCase(payload)
+    );
+    res.json({ job_id });
+  } catch (e) {
+    res.status(500).json({ status: 'ERROR', message: e.message });
+  }
+});
+
 router.get('/',            async (req, res) => { try { res.json(await casemanagement.getAllCases()); } catch (e) { res.status(500).json({ status: 'ERROR', message: e.message }); } });
 router.get('/:ref/log',    async (req, res) => { try { res.json(await readLog(req.params.ref)); } catch (e) { res.status(500).json({ status: 'ERROR', message: e.message }); } });
 router.get('/:ref/data',   async (req, res) => {

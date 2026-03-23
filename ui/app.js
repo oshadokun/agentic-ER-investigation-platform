@@ -50,6 +50,23 @@ async function api(method, url, body) {
   return res.json();
 }
 
+/**
+ * Polls GET /api/jobs/:id every 2 seconds until the job completes or fails.
+ * Resolves with the job result on success.
+ * Rejects with an Error on failure.
+ * @param {string} jobId
+ * @param {Function} [onTick] - called each poll with the current status object
+ */
+async function pollJob(jobId, onTick) {
+  while (true) {
+    await new Promise(r => setTimeout(r, 2000));
+    const s = await api('GET', `/api/jobs/${jobId}`);
+    if (onTick) onTick(s);
+    if (s.status === 'completed') return s.result;
+    if (s.status === 'failed')    throw new Error(s.error || 'Job failed');
+  }
+}
+
 // ─── Loading Spinner ──────────────────────────────────────────────────────────
 
 function Spinner({ label }) {
@@ -64,15 +81,29 @@ function Spinner({ label }) {
 // ─── Nav ──────────────────────────────────────────────────────────────────────
 
 function Nav({ view, setView }) {
+  const [unread, setUnread] = useState(0);
+
+  // Poll unread count every 30 s and on mount
+  useEffect(() => {
+    const load = () => api('GET', '/api/notifications?state=unread')
+      .then(d => setUnread(d.unread_count || 0))
+      .catch(() => {});
+    load();
+    const t = setInterval(load, 30000);
+    return () => clearInterval(t);
+  }, []);
+
   const links = [
-    { key: 'dashboard', label: 'Dashboard' },
-    { key: 'new-case',  label: '+ New Case' },
-    { key: 'help',      label: 'How to Use' },
+    { key: 'dashboard',      label: 'Dashboard' },
+    { key: 'new-case',       label: '+ New Case' },
+    { key: 'notifications',  label: null }, // rendered separately as bell
+    { key: 'help',           label: 'How to Use' },
   ];
+
   return (
     <nav className="bg-white border-b border-gray-200 px-6 py-3 flex items-center gap-6">
       <span className="font-bold text-blue-700 text-lg mr-4">ER Investigation Platform</span>
-      {links.map(l => (
+      {[{ key: 'dashboard', label: 'Dashboard' }, { key: 'new-case', label: '+ New Case' }, { key: 'help', label: 'How to Use' }].map(l => (
         <button
           key={l.key}
           onClick={() => setView({ name: l.key })}
@@ -85,6 +116,21 @@ function Nav({ view, setView }) {
           {l.label}
         </button>
       ))}
+      {/* Notifications bell */}
+      <button
+        onClick={() => setView({ name: 'notifications' })}
+        className={`relative ml-auto text-sm font-medium px-3 py-1 rounded transition ${
+          view.name === 'notifications' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:text-blue-600'
+        }`}
+        title="Notifications"
+      >
+        <span>🔔</span>
+        {unread > 0 && (
+          <span className="absolute -top-1 -right-1 bg-red-600 text-white text-xs rounded-full w-4 h-4 flex items-center justify-center font-bold">
+            {unread > 9 ? '9+' : unread}
+          </span>
+        )}
+      </button>
     </nav>
   );
 }
@@ -225,7 +271,8 @@ function NewCaseForm({ setView }) {
     setSubmitting(true);
 
     try {
-      const result = await api('POST', '/api/cases', {
+      // Enqueue the case intake job — returns immediately with { job_id }
+      const { job_id } = await api('POST', '/api/cases', {
         case_type:           form.case_type,
         complainant_name:    form.complainant_name,
         complainant_role:    form.complainant_role,
@@ -240,10 +287,13 @@ function NewCaseForm({ setView }) {
         legal_involved:      form.legal_involved,
       });
 
-      if (result.status === 'CASE_OPENED') {
+      // Poll until the job completes
+      const result = await pollJob(job_id);
+
+      if (result && result.status === 'CASE_OPENED') {
         setView({ name: 'case-view', caseRef: result.case_reference, caseData: result });
       } else {
-        setError(result.message || JSON.stringify(result));
+        setError((result && result.message) || JSON.stringify(result));
       }
     } catch (e) {
       setError(e.message);
@@ -503,7 +553,10 @@ function CaseView({ caseRef, initialData, setView }) {
         witness_roles:       (src.witnesses || []).map(w => w.role || ''),
       };
 
-      const result = await api('POST', '/api/documents/generate', { anonymisedCase, documentType: docType });
+      // Enqueue document generation job — returns immediately with { job_id }
+      const { job_id } = await api('POST', '/api/documents/generate', { anonymisedCase, documentType: docType });
+      // Poll until the job completes
+      const result = await pollJob(job_id);
       setGenerated({ ...result, caseRef });
       await loadLog();
     } finally {
@@ -651,6 +704,121 @@ function CaseView({ caseRef, initialData, setView }) {
   );
 }
 
+// ─── Quality Review Panel (structured JSON) ───────────────────────────────────
+
+function QualityReviewPanel({ qr }) {
+  if (!qr) return null;
+
+  // Handle QUALITY_PARSE_ERROR (error object, not a full JSON review)
+  if (qr.error) {
+    return (
+      <div className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm">
+        <p className="font-semibold text-red-800 mb-1">Quality Review Error</p>
+        <p className="text-red-700 text-xs">{qr.error}</p>
+      </div>
+    );
+  }
+
+  const qj = qr.quality_json || qr;
+  const result = qr.overall_result || qj.overall_result || 'UNKNOWN';
+  const score  = qr.overall_score  ?? qj.overall_score  ?? 0;
+
+  const resultColor = {
+    PASS:                         'bg-green-50 border-green-200',
+    PASS_WITH_MANDATORY_CORRECTIONS: 'bg-amber-50 border-amber-200',
+    FAIL:                         'bg-red-50 border-red-200',
+    AUTOMATIC_FAIL:               'bg-red-50 border-red-300',
+  }[result] || 'bg-gray-50 border-gray-200';
+
+  const badgeColor = {
+    PASS:                         'bg-green-200 text-green-800',
+    PASS_WITH_MANDATORY_CORRECTIONS: 'bg-amber-200 text-amber-800',
+    FAIL:                         'bg-red-200 text-red-800',
+    AUTOMATIC_FAIL:               'bg-red-300 text-red-900',
+  }[result] || 'bg-gray-200 text-gray-700';
+
+  const stages     = qj.stages || {};
+  const mandatory  = qj.mandatory_corrections  || [];
+  const advisory   = qj.advisory_improvements  || [];
+  const escalation = qj.escalation_flags       || [];
+
+  return (
+    <div className={`rounded-lg border p-4 text-sm ${resultColor}`}>
+      {/* Header row */}
+      <div className="flex items-center gap-3 mb-3">
+        <strong>Quality Review:</strong>
+        <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${badgeColor}`}>
+          {result.replace(/_/g, ' ')}
+        </span>
+        <span className="text-gray-600">Score: {score}/100</span>
+      </div>
+
+      {/* Stage scores */}
+      {Object.keys(stages).length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1 mb-3 text-xs">
+          {Object.entries(stages).map(([key, val]) => (
+            <div key={key} className="flex items-center gap-1">
+              <span className={`w-2 h-2 rounded-full inline-block ${val.passed ? 'bg-green-500' : 'bg-red-500'}`}></span>
+              <span className="text-gray-600 capitalize">{key.replace(/_/g, ' ')}:</span>
+              <span className="font-medium">{val.score !== undefined ? `${val.score}/100` : (val.passed ? 'PASS' : 'FAIL')}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Summary */}
+      {qj.summary && (
+        <p className="text-gray-700 mb-3 italic text-xs">{qj.summary}</p>
+      )}
+
+      {/* Mandatory corrections */}
+      {mandatory.length > 0 && (
+        <div className="mb-3">
+          <p className="font-semibold text-red-700 mb-1 text-xs">Mandatory Corrections ({mandatory.length})</p>
+          <div className="space-y-1">
+            {mandatory.map((mc, i) => (
+              <div key={i} className="bg-red-100 rounded p-2 text-xs">
+                <span className="font-mono font-bold mr-1">{mc.id}</span>
+                <span className="text-red-800">{mc.issue}</span>
+                {mc.location && <span className="text-red-600 ml-1">({mc.location})</span>}
+                {mc.required_action && (
+                  <p className="text-red-700 mt-0.5">→ {mc.required_action}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Advisory improvements */}
+      {advisory.length > 0 && (
+        <div className="mb-3">
+          <p className="font-semibold text-amber-700 mb-1 text-xs">Advisory Improvements ({advisory.length})</p>
+          <div className="space-y-1">
+            {advisory.map((ai, i) => (
+              <div key={i} className="bg-amber-100 rounded p-2 text-xs">
+                <span className="font-mono font-bold mr-1">{ai.id}</span>
+                <span className="text-amber-800">{ai.observation}</span>
+                {ai.suggestion && <p className="text-amber-700 mt-0.5">→ {ai.suggestion}</p>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Escalation flags */}
+      {escalation.length > 0 && (
+        <div>
+          <p className="font-semibold text-red-700 mb-1 text-xs">Escalation Flags</p>
+          {escalation.map((f, i) => (
+            <p key={i} className="text-xs text-red-700">⚠ {f}</p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Document Viewer ──────────────────────────────────────────────────────────
 
 function DocumentViewer({ data, onClose, onApproved }) {
@@ -658,7 +826,9 @@ function DocumentViewer({ data, onClose, onApproved }) {
   const [approved,  setApproved]  = useState(null);
   const [error,     setError]     = useState(null);
 
-  const approve = async () => {
+  const isValidationFailed = data.status === 'VALIDATION_FAILED';
+
+  const approve = async (override = false) => {
     setApproving(true);
     setError(null);
     try {
@@ -666,6 +836,8 @@ function DocumentViewer({ data, onClose, onApproved }) {
         caseReference: data.caseRef,
         documentType:  data.document_type,
         draftText:     data.draft_text,
+        document_id:   data.document_id || undefined,
+        override,
       });
       setApproved(result);
       if (onApproved) onApproved();
@@ -683,38 +855,63 @@ function DocumentViewer({ data, onClose, onApproved }) {
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div>
             <h2 className="font-bold text-lg">{data.document_type}</h2>
-            <p className="text-sm text-gray-500">{data.file_name} · {data.status}</p>
+            <p className="text-sm text-gray-500">
+              {data.file_name}
+              {data.status && (
+                <span className={`ml-2 px-1.5 py-0.5 rounded text-xs font-medium ${
+                  data.status === 'VALIDATION_FAILED'  ? 'bg-red-100 text-red-700' :
+                  data.status === 'VALIDATION_PASSED'  ? 'bg-green-100 text-green-700' :
+                  'bg-gray-100 text-gray-600'
+                }`}>{data.status.replace(/_/g, ' ')}</span>
+              )}
+            </p>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
         </div>
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
-          {/* Quality report */}
+
+          {/* VALIDATION_FAILED banner */}
+          {isValidationFailed && !approved && (
+            <div className="bg-red-50 border border-red-300 rounded-lg p-4 text-sm">
+              <p className="font-semibold text-red-800 mb-1">Validation Failed — Document Cannot Be Approved Normally</p>
+              <p className="text-red-700 text-xs mb-2">
+                This document failed deterministic validation checks after 2 generation attempts.
+                The document requires investigator review before it can proceed.
+              </p>
+              {data.validation_failures && data.validation_failures.length > 0 && (
+                <ul className="list-disc list-inside text-xs text-red-700 space-y-0.5 mb-2">
+                  {data.validation_failures.map((f, i) => <li key={i}>{f}</li>)}
+                </ul>
+              )}
+              <p className="text-xs text-red-600 font-medium">
+                You may override validation and approve manually — this will be recorded in the audit log.
+              </p>
+            </div>
+          )}
+
+          {/* Policy injection summary */}
+          {data.policies_injected && data.policies_injected.length > 0 && (
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800">
+              <span className="font-semibold">Policies applied: </span>
+              {data.policies_injected.map(p => `${p.name} v${p.version}`).join(', ')}
+            </div>
+          )}
+          {data.policies_injected && data.policies_injected.length === 0 && (
+            <div className="text-xs text-gray-400 italic">No policy templates injected for this document type.</div>
+          )}
+
+          {/* Quality review (structured) */}
           {data.quality_review && (
-            <div className={`rounded-lg border p-4 text-sm ${
-              data.quality_review.overall_result === 'PASS'
-                ? 'bg-green-50 border-green-200'
-                : data.quality_review.overall_result === 'FAIL'
-                ? 'bg-red-50 border-red-200'
-                : 'bg-amber-50 border-amber-200'
-            }`}>
-              <div className="flex items-center gap-3 mb-2">
-                <strong>Quality Review:</strong>
-                <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
-                  data.quality_review.overall_result === 'PASS'
-                    ? 'bg-green-200 text-green-800'
-                    : data.quality_review.overall_result === 'FAIL'
-                    ? 'bg-red-200 text-red-800'
-                    : 'bg-amber-200 text-amber-800'
-                }`}>
-                  {data.quality_review.overall_result}
-                </span>
-                <span className="text-gray-600">Score: {data.quality_review.overall_score}/100</span>
-              </div>
-              <pre className="whitespace-pre-wrap text-xs text-gray-700 font-mono overflow-x-auto">
-                {data.quality_review.quality_report}
-              </pre>
+            <QualityReviewPanel qr={data.quality_review} />
+          )}
+
+          {/* Validation failures (non-VALIDATION_FAILED status — passed but had attempt 2) */}
+          {!isValidationFailed && data.attempt === 2 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
+              <span className="font-semibold">Note: </span>
+              This document passed validation on attempt 2. The first attempt required regeneration.
             </div>
           )}
 
@@ -729,10 +926,32 @@ function DocumentViewer({ data, onClose, onApproved }) {
           {/* Approved result */}
           {approved && (
             <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-sm">
-              <p className="font-semibold text-green-800 mb-1">✓ Document Approved — FINAL saved</p>
-              <p className="text-green-700">Filed: {approved.file_path}</p>
+              <p className="font-semibold text-green-800 mb-2">
+                {approved.status === 'Approved (override)' ? '⚠ Document Approved (Override)' : '✓ Document Approved'} — FINAL saved
+              </p>
+              <p className="text-green-700 mb-2">HTML: {approved.file_path}</p>
+              <div className="flex gap-3 text-xs">
+                {approved.docx_path && (
+                  <a
+                    href={`/api/documents/download/docx/${data.caseRef}?documentType=${encodeURIComponent(data.document_type)}`}
+                    download
+                    className="px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700 font-medium"
+                  >
+                    Download DOCX
+                  </a>
+                )}
+                {approved.pdf_path && (
+                  <a
+                    href={`/api/documents/download/pdf/${data.caseRef}?documentType=${encodeURIComponent(data.document_type)}`}
+                    download
+                    className="px-3 py-1.5 rounded bg-red-600 text-white hover:bg-red-700 font-medium"
+                  >
+                    Download PDF
+                  </a>
+                )}
+              </div>
               {approved.warning && (
-                <p className="text-amber-700 mt-2">⚠ {approved.warning}</p>
+                <p className="text-amber-700 mt-2 text-xs">⚠ {approved.warning}</p>
               )}
             </div>
           )}
@@ -746,9 +965,18 @@ function DocumentViewer({ data, onClose, onApproved }) {
             className="px-4 py-2 rounded border border-gray-300 text-sm text-gray-700 hover:bg-gray-50">
             Close
           </button>
-          {!approved && (
+          {!approved && isValidationFailed && (
             <button
-              onClick={approve}
+              onClick={() => approve(true)}
+              disabled={approving}
+              className="px-4 py-2 rounded border border-red-400 text-red-700 text-sm font-semibold hover:bg-red-50 disabled:opacity-60"
+            >
+              {approving ? 'Saving...' : 'Override & Approve'}
+            </button>
+          )}
+          {!approved && !isValidationFailed && (
+            <button
+              onClick={() => approve(false)}
               disabled={approving}
               className="px-5 py-2 rounded bg-green-600 text-white text-sm font-semibold hover:bg-green-700 disabled:opacity-60"
             >
@@ -971,6 +1199,132 @@ function HelpPage() {
   );
 }
 
+// ─── Notifications Panel ──────────────────────────────────────────────────────
+
+function NotificationsPanel() {
+  const [data,       setData]       = useState(null);
+  const [loading,    setLoading]    = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const [filter,     setFilter]     = useState('unread');
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const d = await api('GET', `/api/notifications${filter ? `?state=${filter}` : ''}`);
+      setData(d);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, [filter]);
+
+  const generate = async () => {
+    setGenerating(true);
+    try {
+      await api('POST', '/api/notifications/generate');
+      await load();
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const updateState = async (id, state) => {
+    await api('PATCH', `/api/notifications/${id}`, { state });
+    await load();
+  };
+
+  const typeColor = t => t === 'overdue'
+    ? 'bg-red-50 border-red-200 text-red-800'
+    : 'bg-amber-50 border-amber-200 text-amber-800';
+
+  const typeBadge = t => t === 'overdue'
+    ? 'bg-red-200 text-red-800'
+    : 'bg-amber-200 text-amber-800';
+
+  return (
+    <div className="p-6 max-w-3xl mx-auto">
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-2xl font-bold">Notifications</h1>
+        <div className="flex gap-2">
+          <button onClick={generate} disabled={generating}
+            className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-60">
+            {generating ? 'Checking...' : 'Check Deadlines'}
+          </button>
+        </div>
+      </div>
+
+      {/* Filter tabs */}
+      <div className="flex gap-2 mb-4 border-b border-gray-200">
+        {[['unread','Unread'], ['dismissed','Dismissed'], ['resolved','Resolved'], ['','All']].map(([val, label]) => (
+          <button key={val} onClick={() => setFilter(val)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition ${
+              filter === val ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Unread count banner */}
+      {data && data.unread_count > 0 && filter === 'unread' && (
+        <div className="mb-4 px-4 py-2 bg-red-50 border border-red-200 rounded text-sm text-red-800 font-medium">
+          {data.unread_count} unread notification{data.unread_count !== 1 ? 's' : ''}
+        </div>
+      )}
+
+      {loading ? <Spinner label="Loading notifications..." /> : (
+        <div className="space-y-3">
+          {(!data || !data.notifications || data.notifications.length === 0) && (
+            <div className="bg-white border border-gray-200 rounded-lg p-8 text-center text-gray-400 text-sm">
+              {filter === 'unread' ? 'No unread notifications. Click "Check Deadlines" to scan for upcoming or overdue cases.' : 'No notifications found.'}
+            </div>
+          )}
+          {data && data.notifications && data.notifications.map(n => (
+            <div key={n.id} className={`rounded-lg border p-4 ${typeColor(n.type)}`}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${typeBadge(n.type)}`}>
+                      {n.type === 'overdue' ? 'OVERDUE' : 'UPCOMING'}
+                    </span>
+                    <span className="text-xs text-gray-500 font-mono">{n.case_reference}</span>
+                    <span className={`ml-auto text-xs px-2 py-0.5 rounded-full ${
+                      n.state === 'unread' ? 'bg-blue-100 text-blue-700' :
+                      n.state === 'dismissed' ? 'bg-gray-100 text-gray-600' :
+                      'bg-green-100 text-green-700'
+                    }`}>{n.state}</span>
+                  </div>
+                  <p className="text-sm font-medium">{n.message}</p>
+                  <p className="text-xs text-gray-500 mt-1">{new Date(n.created_at).toLocaleDateString()}</p>
+                </div>
+                {n.state === 'unread' && (
+                  <div className="flex gap-2 flex-shrink-0">
+                    <button onClick={() => updateState(n.id, 'dismissed')}
+                      className="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-white">
+                      Dismiss
+                    </button>
+                    <button onClick={() => updateState(n.id, 'resolved')}
+                      className="text-xs px-2 py-1 rounded bg-green-600 text-white hover:bg-green-700">
+                      Resolved
+                    </button>
+                  </div>
+                )}
+                {n.state === 'dismissed' && (
+                  <button onClick={() => updateState(n.id, 'resolved')}
+                    className="text-xs px-2 py-1 rounded bg-green-600 text-white hover:bg-green-700 flex-shrink-0">
+                    Resolved
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── App Root ─────────────────────────────────────────────────────────────────
 
 function App() {
@@ -995,6 +1349,10 @@ function App() {
             initialData={view.caseData || {}}
             setView={setView}
           />
+        )}
+
+        {view.name === 'notifications' && (
+          <NotificationsPanel />
         )}
 
         {view.name === 'help' && (

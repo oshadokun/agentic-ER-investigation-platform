@@ -37,9 +37,12 @@ app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'ui')));
 
-app.use('/api/cases',     require('./api/cases'));
-app.use('/api/documents', require('./api/documents'));
-app.use('/api/tracker',   require('./api/tracker'));
+app.use('/api/cases',            require('./api/cases'));
+app.use('/api/documents',        require('./api/documents'));
+app.use('/api/tracker',          require('./api/tracker'));
+app.use('/api/policy-templates', require('./api/policy-templates'));
+app.use('/api/notifications',    require('./api/notifications'));
+app.use('/api/jobs',             require('./api/jobs'));
 
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'ui', 'index.html')));
 
