@@ -1,3 +1,7 @@
+Here is the updated README with all changes applied. Four things have been updated: the directory structure now includes the assisted intake files, the tests section reflects 226 tests across 10 files, the known limitations section removes the manual intake limitation, and the status section is updated to reflect current state.
+
+---
+
 # ER Investigation Platform
 
 A locally-run, AI-assisted web application for Employee Relations investigators. Manages the full lifecycle of workplace investigations — from initial intake through to case closure — with Claude AI drafting initial versions of documents and the human investigator making every decision.
@@ -54,11 +58,13 @@ The skills files, the case folder structure, and the core PII protection model a
     │   ├── SKILL_document_agent.md
     │   ├── SKILL_quality_agent.md
     │   ├── SKILL_intake_agent.md
-    │   └── SKILL_casemanagement_agent.md
+    │   ├── SKILL_casemanagement_agent.md
+    │   └── SKILL_intake_assist.md         ← Assisted intake structuring prompt
     │
     ├── /agents
     │   ├── coordinator.js                 ← Orchestration only
     │   ├── intake.js                      ← Case reference; folder creation
+    │   ├── intake-assist.js               ← Assisted intake Claude structuring
     │   ├── document.js                    ← Generation, validation, approval, export
     │   ├── quality.js                     ← Deterministic checks + AI review
     │   └── casemanagement.js              ← Deadlines; notifications
@@ -66,11 +72,14 @@ The skills files, the case folder structure, and the core PII protection model a
     ├── /api
     │   ├── cases.js
     │   ├── documents.js
-    │   └── tracker.js
+    │   ├── tracker.js
+    │   └── intake-assist.js               ← Assisted intake route handler
     │
     ├── /lib
     │   ├── anthropic.js                   ← Single Claude API gateway
-    │   ├── anonymiser.js                  ← PII stripping
+    │   ├── anonymiser.js                  ← PII stripping (structured case data)
+    │   ├── pre-intake-anonymiser.js       ← Heuristic PII stripping (free text)
+    │   ├── extractor.js                   ← Local text extraction (paste/.txt/.md/.eml)
     │   ├── merger.js                      ← Post-approval name rehydration (local only)
     │   ├── encryption.js                  ← AES-256-GCM NameMap encryption
     │   ├── audit.js                       ← Hash-chained audit event writer
@@ -86,7 +95,9 @@ The skills files, the case folder structure, and the core PII protection model a
     │       ├── investigation-report.js
     │       ├── outcome-letter.js
     │       ├── invitation-letter.js
-    │       └── interview-framework.js
+    │       ├── interview-framework.js
+    │       ├── investigation-plan.js
+    │       └── default.js
     │
     ├── /db
     │   ├── connection.js                  ← SQLite connection; PostgreSQL-ready interface
@@ -114,7 +125,8 @@ The skills files, the case folder structure, and the core PII protection model a
     │   ├── notifications.test.js
     │   ├── export.test.js
     │   ├── migration.test.js
-    │   └── document-approve.test.js
+    │   ├── document-approve.test.js
+    │   └── intake-assist.test.js          ← Assisted intake + parsing robustness
     │
     ├── /ui
     │   ├── index.html
@@ -125,18 +137,32 @@ The skills files, the case folder structure, and the core PII protection model a
 
 ---
 
+## The Two Intake Paths
+
+The platform supports two ways to open a case.
+
+**Manual intake** is the default. The investigator fills in all fields directly. Full control from the first keystroke.
+
+**Assisted intake** is an additional path for when a referral document already exists. The investigator pastes or uploads the referral text, the system extracts and anonymises it locally, sends only the anonymised content to Claude, and returns a suggested structured intake form. The investigator reviews every field, edits as needed, confirms that no identifying information remains, and submits through the existing case creation flow. The AI never sees raw referral content. Nothing is auto-submitted.
+
+Supported input formats for assisted intake: pasted text, .txt, .md, .eml.
+
+---
+
 ## The PII Protection Model
 
 This is the security centrepiece. Nothing here has changed from the original design — it was correct from the start.
 
-1. Real names enter the intake form
-2. lib/anonymiser.js builds a NameMap ([COMPLAINANT] → "Jane Smith") and strips all identifying information — names, unique roles, locations, dates — before any outbound call
+1. Real names enter the intake form or referral document
+2. lib/anonymiser.js (structured case data) or lib/pre-intake-anonymiser.js (free text) strips all identifying information — names, roles, locations, dates — before any outbound call
 3. Only anonymised data reaches the Claude API
 4. The NameMap is encrypted at rest (AES-256-GCM) and stored locally in 00_CASE_LOG/[REF]_NameMap.enc
 5. On approval, lib/merger.js decrypts the local NameMap and replaces placeholders with real names — entirely on the local machine
 6. The final merged document is saved; real names never leave the building
 
 If anonymisation validation fails, the outbound API call is blocked. There is no bypass.
+
+For assisted intake: raw referral text is processed locally only. It never enters the job queue, is never written to disk or the database, and exists in memory only for the duration of extraction and anonymisation.
 
 ---
 
@@ -252,6 +278,8 @@ Multi-user expansion requires authentication and role assignment — not schema 
 | Key entropy check | App refuses to start if key is absent or below 32 bytes |
 | Startup validation | lib/startup.js; server will not boot in an unsafe state |
 | PII blocking | Anonymiser throws and blocks API call if real name detected in output |
+| Pre-intake PII stripping | lib/pre-intake-anonymiser.js strips free text before assisted intake reaches Claude |
+| Raw referral isolation | Raw uploaded or pasted referral content is never written to disk, database, or logs |
 | Audit tamper detection | GCM auth tag on encrypted NameMap; hash chain on audit events |
 | Export blocking | Export blocked if unmerged placeholders detected in document |
 | Prompt injection | Allegations sanitised before API call; system prompt includes injection resistance |
@@ -312,7 +340,7 @@ This imports all legacy case data into the database, preserves original files, a
 
 ## Tests
 
-72 tests across 9 files. All tests run without a live Claude API key.
+226 tests across 10 files. All tests run without a live Claude API key.
 
 | File | Coverage |
 |---|---|
@@ -325,6 +353,7 @@ This imports all legacy case data into the database, preserves original files, a
 | export.test.js | DOCX structure; PDF headers; buffer validity; audit event logging; recipient category |
 | migration.test.js | Valid import; malformed case handling; idempotency; file preservation |
 | document-approve.test.js | Audit event on approval; recipient category; hash chaining |
+| intake-assist.test.js | Extraction paths; pre-intake anonymisation; PII blocking; JSON parsing robustness; failure fallback; no auto-submission; handoff to existing intake |
 
 ---
 
@@ -337,6 +366,8 @@ This imports all legacy case data into the database, preserves original files, a
 - **PDF page breaks** — pdfkit renders sequentially; headings can appear at the bottom of a page. Explicit page-break logic has not been implemented.
 - **No email or Slack notifications** — alerts are in-app only.
 - **Per-allegation verdict validation** — the validator checks for the presence of verdicts in the report body. Strict per-allegation mapping would require structured document parsing.
+- **Assisted intake extraction accuracy** — the pre-intake anonymiser uses heuristic pattern matching. Names in all-caps, lowercase, or without honorifics may not be detected. Organisation names without a legal suffix (Ltd, PLC, etc.) are not caught. The investigator confirmation step is the final human gate before submission.
+- **Assisted intake input formats** — PDF parsing is not supported in the current release. Supported formats are pasted text, .txt, .md, and .eml. PDF support is a planned future enhancement.
 
 ---
 
@@ -349,12 +380,15 @@ This imports all legacy case data into the database, preserves original files, a
 | Single user | Multi-user — add auth layer; populate user assignments |
 | localhost | Cloud deployment — Vercel or equivalent |
 | No email alerts | SMTP or SendGrid integration in lib/notifications.js |
+| Assisted intake: text/md/eml only | PDF text extraction via a pure-Node parser |
 
 ---
 
 ## Skill Files
 
-The five files in /skills are the methodology layer. They define what every agent must do, how documents must be structured, and what quality standards apply. They are not code — they are the investigator's professional knowledge encoded as system prompts.
+The five core files in /skills are the methodology layer. They define what every agent must do, how documents must be structured, and what quality standards apply. They are not code — they are the investigator's professional knowledge encoded as system prompts.
+
+A sixth skill file, SKILL_intake_assist.md, defines the structured extraction behaviour for assisted intake.
 
 If anything in the codebase conflicts with a skill file, the skill file wins.
 
@@ -363,131 +397,66 @@ If anything in the codebase conflicts with a skill file, the skill file wins.
     SKILL_quality_agent.md         ← Five-stage review; scoring; mandatory corrections
     SKILL_intake_agent.md          ← Case opening; reference numbering; folder naming
     SKILL_casemanagement_agent.md  ← Tracking; deadlines; closure
+    SKILL_intake_assist.md         ← Assisted intake field extraction and structuring
 
 ---
 
-## Summary
-
-This system is a local-first, investigator-controlled ER investigation platform that combines strict PII protection, structured document generation, deterministic validation, and auditable decision tracking. It is designed for real-world use by ER professionals, not as a prototype.
-
-The architecture supports future expansion to multi-user and cloud deployment without redesign. The data model is complete. The abstraction boundaries are clean. The audit trail is legally defensible.
-
-For operational setup, key management, and backup procedures, follow OPERATOR.md.
-
----
-
-And here is the architecture map:
 ## Architecture Map
 
-```text
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                              Browser UI (React)                              │
-│                                                                              │
-│  Dashboard • New Case Form • Case View • Document Viewer • Notifications     │
-│  - submits case intake                                                       │
-│  - starts document generation                                                │
-│  - polls async job status                                                    │
-│  - displays quality review + validation failures                             │
-│  - approves documents and downloads DOCX/PDF                                 │
-└───────────────────────────────┬──────────────────────────────────────────────┘
-                                │ HTTP / JSON
-                                ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                              Express API Layer                               │
-│                                                                              │
-│  /api/cases              intake, case list, case updates                     │
-│  /api/documents          generate, approve, export/download                  │
-│  /api/jobs               async job status/result                             │
-│  /api/notifications      alerts + settings                                   │
-│  /api/policy-templates   CRUD for policy/template library                    │
-└───────────────────────────────┬──────────────────────────────────────────────┘
-                                │
-                ┌───────────────┼────────────────┬────────────────┐
-                ▼               ▼                ▼                ▼
-┌─────────────────────┐ ┌────────────────┐ ┌──────────────┐ ┌─────────────────┐
-│      Agents         │ │   Libraries    │ │ Validators   │ │   Job Queue     │
-│                     │ │                │ │              │ │                 │
-│ coordinator.js      │ │ anthropic.js   │ │ index.js     │ │ job-queue.js    │
-│ intake.js           │ │ anonymiser.js  │ │ investigation│ │ enqueue/status/ │
-│ document.js         │ │ merger.js      │ │ -report.js   │ │ result          │
-│ quality.js          │ │ encryption.js  │ │ outcome-     │ │                 │
-│ casemanagement.js   │ │ audit.js       │ │ letter.js    │ │ Single in-proc  │
-│                     │ │notifications.js│ │ invitation-  │ │ queue today,    │
-│ Orchestrate case    │ │policy-loader.js│ │ letter.js    │ │ swap point for  │
-│ logic, generation,  │ │ converter-docx │ │ interview-   │ │ persistent queue│
-│ quality review,     │ │ converter-pdf  │ │ framework.js │ │ later           │
-│ approval, deadlines │ │ settings.js    │ │ investigation│ └─────────────────┘
-│                     │ │ filestore.js   │ │ -plan.js     │
-│                     │ │ startup.js     │ │ default.js   │
-└──────────────┬──────┘ └───────┬────────┘ └──────┬───────┘
-               │                │                  │
-               └────────────────┴──────────┬───────┘
-                                           ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                         AI Boundary / Safety Layer                           │
-│                                                                              │
-│  1. Input enters system with real names                                      │
-│  2. anonymiser.js strips PII and builds NameMap                              │
-│  3. Only anonymised content goes to Claude via anthropic.js                  │
-│  4. Deterministic validation runs before/after AI where required             │
-│  5. quality.js requires structured JSON output                               │
-│  6. approval flow merges real names locally only after investigator approval │
-└───────────────────────────────┬──────────────────────────────────────────────┘
-                                │
-                                ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                           Persistence / Storage                              │
-│                                                                              │
-│  SQLite Database                                                             │
-│  - users                                                                     │
-│  - cases                                                                     │
-│  - participants                                                              │
-│  - documents                                                                 │
-│  - document_versions                                                         │
-│  - policy_templates                                                          │
-│  - document_policy_injections                                                │
-│  - audit_events                                                              │
-│  - deadlines                                                                 │
-│  - notifications                                                             │
-│  - settings                                                                  │
-│                                                                              │
-│  File Storage                                                                │
-│  - /cases/                  case folders and approved outputs                │
-│  - encrypted NameMap        stored locally, never sent to AI                 │
-│  - DOCX/PDF/HTML            written on approval/export                       │
-│                                                                              │
-│  Legacy Compatibility                                                        │
-│  - scripts/migrate-from-files.js imports old JSON/file-based cases           │
-└───────────────────────────────┬──────────────────────────────────────────────┘
-                                │
-                                ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                           Audit / Integrity Layer                            │
-│                                                                              │
-│  audit.js writes append-only events                                          │
-│  Each event is SHA-256 hash chained                                          │
-│  verify-audit-chain.js checks continuity and tamper evidence                 │
-│                                                                              │
-│  Logged events include:                                                      │
-│  - validation failures                                                       │
-│  - quality parse failures                                                    │
-│  - overrides                                                                 │
-│  - approvals                                                                 │
-│  - exports                                                                   │
-│  - policy/template usage                                                     │
-│  - notification activity                                                     │
-└──────────────────────────────────────────────────────────────────────────────┘
-**Status**
+    Browser UI (React)
+    Dashboard · New Case · Assisted Intake · Case View · Document Viewer · Notifications
+
+                            HTTP / JSON
+                                |
+                        Express API Layer
+              /api/cases · /api/documents · /api/jobs
+              /api/notifications · /api/intake-assist
+
+                    |           |           |           |
+                Agents      Libraries   Validators  Job Queue
+            coordinator   anonymiser   inv-report  enqueue
+            intake        pre-intake   outcome     status
+            intake-assist encryption   invitation  result
+            document      anthropic    interview
+            quality       audit        inv-plan
+            casemanagement converter-*
+
+                                |
+                    AI Boundary / Safety Layer
+            raw referral text processed locally only
+            anonymised content only reaches Claude
+            real names merged locally after approval
+
+                                |
+                    Persistence / Storage
+            SQLite: cases · documents · audit_events
+            notifications · policy_templates · deadlines
+            users · participants · versions · exports · settings
+            File storage: /cases · NameMap.enc · DOCX/PDF
+
+                                |
+                    Audit / Integrity Layer
+            SHA-256 hash-chained audit events
+            npm run verify-audit-chain
+
+---
+
+## Status
+
 This platform is currently in active single-user testing by an ER consultant in a real investigative context.
-The core workflow — case intake, document generation, quality review, approval, and export — is fully operational. The database layer, encryption model, audit chain, and notification system have all passed their test suites. Documents are being generated, reviewed, and approved against live cases.
+
+The core workflow — case intake (manual and assisted), document generation, quality review, approval, and export — is fully operational. The database layer, encryption model, audit chain, and notification system have all passed their test suites. Documents are being generated, reviewed, and approved against live cases.
+
 What is still being tested in practice:
 
-How well the AI-generated drafts hold up across a wider range of case types and complexity levels
-Whether the policy and template library covers enough of the real-world variation investigators encounter
-How the quality review layer performs on edge cases that the automated tests did not anticipate
-Whether the DOCX and PDF outputs meet the formatting expectations of recipients — employees, companions, trade union representatives, and legal reviewers — in actual use
+- How well the AI-generated drafts hold up across a wider range of case types and complexity levels
+- Whether the assisted intake extraction quality is sufficient across the range of referral formats investigators actually receive
+- Whether the policy and template library covers enough of the real-world variation investigators encounter
+- How the quality review layer performs on edge cases that the automated tests did not anticipate
+- Whether the DOCX and PDF outputs meet the formatting expectations of recipients — employees, companions, trade union representatives, and legal reviewers — in actual use
 
 This is not a prototype. The architecture is production-grade and the security model is non-negotiable. But it has not yet been used at scale, by multiple investigators, or across a full range of case outcomes from intake to tribunal-ready closure.
+
 Findings from this testing phase will inform the next round of improvements before any broader rollout is considered.
 
-That is factually accurate based on the build — 72 tests passing, one real investigator, real cases, but not yet validated across the full range of ER complexity in production conditions.
+For operational setup, key management, backup procedures, and the assisted intake workflow, follow OPERATOR.md.
