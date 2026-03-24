@@ -1,7 +1,3 @@
-Here is the updated README with all changes applied. Four things have been updated: the directory structure now includes the assisted intake files, the tests section reflects 226 tests across 10 files, the known limitations section removes the manual intake limitation, and the status section is updated to reflect current state.
-
----
-
 # ER Investigation Platform
 
 A locally-run, AI-assisted web application for Employee Relations investigators. Manages the full lifecycle of workplace investigations — from initial intake through to case closure — with Claude AI drafting initial versions of documents and the human investigator making every decision.
