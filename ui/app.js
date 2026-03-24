@@ -306,7 +306,18 @@ function NewCaseForm({ setView }) {
 
   return (
     <div className="p-6 max-w-3xl mx-auto">
-      <h1 className="text-2xl font-bold mb-6">New Case</h1>
+      <h1 className="text-2xl font-bold mb-4">New Case</h1>
+
+      {/* Assisted intake entry point — additive only, manual form unchanged */}
+      <div className="mb-5 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center justify-between text-sm">
+        <span className="text-blue-700">Have a referral document or email? Let the system suggest intake fields.</span>
+        <button
+          onClick={() => setView({ name: 'assisted-intake' })}
+          className="ml-4 px-3 py-1.5 rounded bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 whitespace-nowrap"
+        >
+          Use Assisted Intake →
+        </button>
+      </div>
 
       {error && (
         <div className="mb-4 p-4 bg-red-50 border border-red-300 rounded text-red-700 text-sm whitespace-pre-wrap">
@@ -1325,6 +1336,691 @@ function NotificationsPanel() {
   );
 }
 
+// ─── Assisted Intake Flow ────────────────────────────────────────────────────
+//
+// 4-step flow: InputStep → ProcessingStep → ReviewStep → submit (POST /api/cases)
+//
+// SECURITY BOUNDARY:
+//   Raw text goes to POST /api/intake-assist.
+//   The server extracts, anonymises locally, then enqueues a Claude job.
+//   Raw content is never stored. Claude never receives raw PII.
+//   Case creation happens only when the investigator explicitly submits
+//   the reviewed form through the existing POST /api/cases route.
+
+function AssistedIntakeFlow({ setView }) {
+  const [step,         setStep]        = useState('input');
+  const [jobId,        setJobId]       = useState(null);
+  const [assistResult, setAssistResult] = useState(null);
+  const [inputError,   setInputError]  = useState(null);
+
+  const handleInputSubmit = async (text, filename) => {
+    setInputError(null);
+    try {
+      const data = await api('POST', '/api/intake-assist', { text, filename });
+      if (data.error) {
+        setInputError({ message: data.error, canRetry: data.canRetry, fallbackToManual: data.fallbackToManual });
+        return;
+      }
+      setJobId(data.job_id);
+      setStep('processing');
+    } catch (e) {
+      setInputError({ message: e.message, canRetry: true, fallbackToManual: true });
+    }
+  };
+
+  const handleJobComplete = (result) => {
+    if (!result || result.status === 'ASSIST_FAILED') {
+      setInputError({
+        message:         (result && result.error) || 'The AI did not return a usable response.',
+        canRetry:        true,
+        fallbackToManual: true,
+      });
+      setStep('input');
+    } else {
+      setAssistResult(result);
+      setStep('review');
+    }
+  };
+
+  const handleJobFail = (err) => {
+    setInputError({ message: err.message, canRetry: true, fallbackToManual: true });
+    setStep('input');
+  };
+
+  const goManual = () => setView({ name: 'new-case' });
+  const goInput  = () => { setInputError(null); setStep('input'); };
+
+  if (step === 'input')      return <AssistedInputStep      onSubmit={handleInputSubmit} onFallback={goManual} error={inputError} />;
+  if (step === 'processing') return <AssistedProcessingStep jobId={jobId} onComplete={handleJobComplete} onFail={handleJobFail} onFallback={goManual} />;
+  if (step === 'review')     return <AssistedReviewStep     assistResult={assistResult} onFallback={goManual} onRetry={goInput} setView={setView} />;
+  return null;
+}
+
+// ── Step 1: Input ─────────────────────────────────────────────────────────────
+
+function AssistedInputStep({ onSubmit, onFallback, error }) {
+  const [text,       setText]      = useState('');
+  const [filename,   setFilename]  = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload  = (ev) => { setText(ev.target.result); setFilename(file.name); };
+    reader.onerror = ()   => { setText(''); setFilename(''); };
+    reader.readAsText(file);
+  };
+
+  const handleSubmit = async () => {
+    if (!text.trim()) return;
+    setSubmitting(true);
+    await onSubmit(text, filename);
+    setSubmitting(false);
+  };
+
+  return (
+    <div className="p-6 max-w-3xl mx-auto">
+      <div className="flex items-start justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-bold">Assisted Intake</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            Paste or upload a referral document. The system extracts and anonymises the text
+            locally, then suggests structured intake fields for your review.
+          </p>
+        </div>
+        <button onClick={onFallback} className="text-sm text-gray-500 hover:text-blue-600 whitespace-nowrap ml-4">
+          ← Manual Intake
+        </button>
+      </div>
+
+      {error && (
+        <div className="mb-4 p-4 bg-red-50 border border-red-300 rounded-lg text-sm">
+          <p className="font-semibold text-red-800 mb-1">Could not process referral</p>
+          <p className="text-red-700">{error.message}</p>
+          <div className="mt-2 flex gap-4">
+            {error.canRetry && <span className="text-red-600 text-xs">Edit the text below and try again.</span>}
+            {error.fallbackToManual && (
+              <button onClick={onFallback} className="text-xs text-blue-600 hover:underline">
+                Switch to manual intake →
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
+        <strong>Privacy:</strong> Referral text is processed locally. It is anonymised on this server
+        before anything is sent to the AI. Raw content is never stored or logged.
+      </div>
+
+      <section className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+        <h2 className="font-semibold mb-2 text-sm">
+          Upload a file <span className="font-normal text-gray-400">(optional — .txt, .md, .eml)</span>
+        </h2>
+        <input
+          type="file"
+          accept=".txt,.md,.eml"
+          onChange={handleFile}
+          className="text-sm text-gray-600 file:mr-4 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-sm file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+        />
+        {filename && <p className="mt-2 text-xs text-gray-500">Loaded: <span className="font-mono">{filename}</span></p>}
+      </section>
+
+      <section className="bg-white border border-gray-200 rounded-lg p-4 mb-6">
+        <h2 className="font-semibold mb-2 text-sm">Or paste referral text</h2>
+        <textarea
+          value={text}
+          onChange={e => setText(e.target.value)}
+          placeholder="Paste the referral email or document text here..."
+          rows={10}
+          className="w-full border border-gray-300 rounded px-3 py-2 text-sm font-mono resize-y"
+        />
+        {text && <p className="mt-1 text-xs text-gray-400">{text.length.toLocaleString()} characters</p>}
+      </section>
+
+      <div className="flex items-center justify-between">
+        <button onClick={onFallback} className="text-sm text-gray-500 hover:text-blue-600">
+          Skip — use manual intake instead
+        </button>
+        <button
+          onClick={handleSubmit}
+          disabled={!text.trim() || submitting}
+          className="px-6 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {submitting ? 'Sending...' : 'Extract & Analyse Referral'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Step 2: Processing ────────────────────────────────────────────────────────
+
+function AssistedProcessingStep({ jobId, onComplete, onFail, onFallback }) {
+  const [statusMsg, setStatusMsg] = useState('Anonymising referral text...');
+  const [elapsed,   setElapsed]   = useState(0);
+  const timerRef = React.useRef(null);
+
+  useEffect(() => {
+    const start = Date.now();
+    timerRef.current = setInterval(() => {
+      const s = Math.floor((Date.now() - start) / 1000);
+      setElapsed(s);
+      if (s > 5)  setStatusMsg('Sending anonymised text to AI for structuring...');
+      if (s > 15) setStatusMsg('AI is reading the referral and extracting intake fields...');
+      if (s > 45) setStatusMsg('Still working — this can take up to 90 seconds...');
+    }, 1000);
+
+    pollJob(jobId)
+      .then(result => { clearInterval(timerRef.current); onComplete(result); })
+      .catch(err   => { clearInterval(timerRef.current); onFail(err); });
+
+    return () => clearInterval(timerRef.current);
+  }, [jobId]);
+
+  return (
+    <div className="p-6 max-w-3xl mx-auto">
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-bold">Assisted Intake</h1>
+        <button onClick={onFallback} className="text-sm text-gray-500 hover:text-blue-600">← Manual Intake</button>
+      </div>
+
+      <div className="bg-white border border-gray-200 rounded-lg p-12 text-center">
+        <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+        <p className="text-gray-700 font-medium mb-1">{statusMsg}</p>
+        <p className="text-gray-400 text-sm font-mono">{elapsed}s</p>
+        <p className="text-gray-400 text-xs mt-4">Document generation via AI can take 60–90 seconds. This is normal.</p>
+      </div>
+
+      <div className="mt-4 text-center">
+        <button onClick={onFallback} className="text-sm text-gray-500 hover:text-blue-600">
+          Cancel — fall back to manual intake
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Step 3: Review ────────────────────────────────────────────────────────────
+
+function AssistedReviewStep({ assistResult, onFallback, onRetry, setView }) {
+  const { suggestions = {}, missing_fields = [], low_confidence_fields = [], entity_log = {}, output_pii_flags = [] } = assistResult || {};
+
+  const [form, setForm] = useState(() => ({
+    case_type:           CASE_TYPES.includes(suggestions.case_type) ? suggestions.case_type : 'Grievance',
+    complainant_name:    '',
+    complainant_role:    suggestions.complainant_role || '',
+    respondent_name:     '',
+    respondent_role:     suggestions.respondent_role  || '',
+    // Each allegation is its own independent row (condition 9)
+    allegations:         (suggestions.allegations && suggestions.allegations.length) ? [...suggestions.allegations] : [''],
+    // Witness roles pre-filled; names left blank for investigator
+    witnesses:           (suggestions.witness_roles || []).map(r => ({ name: '', role: r })),
+    incident_period:     suggestions.incident_period || '',
+    // Clear placeholder tokens from referring_party — investigator must supply real value
+    referring_party:     (suggestions.referring_party && !/^\[.+\]$/.test(suggestions.referring_party))
+                           ? suggestions.referring_party : '',
+    policies_applicable: (suggestions.policies_applicable && suggestions.policies_applicable.length)
+                           ? [...suggestions.policies_applicable] : [''],
+    evidence_types:      (suggestions.evidence_types || []).filter(t => EVIDENCE_TYPES.includes(t)),
+    legal_involved:      suggestions.legal_involved || false,
+    conflict_of_interest: false,
+  }));
+
+  const [piiConfirmed, setPiiConfirmed] = useState(false);
+  const [submitting,   setSubmitting]   = useState(false);
+  const [error,        setError]        = useState(null);
+
+  const set = (key, val) => setForm(f => ({ ...f, [key]: val }));
+
+  const addAllegation    = ()      => set('allegations', [...form.allegations, '']);
+  const removeAllegation = (i)     => set('allegations', form.allegations.filter((_, idx) => idx !== i));
+  const updateAllegation = (i, v)  => set('allegations', form.allegations.map((x, idx) => idx === i ? v : x));
+
+  const addPolicy    = ()      => set('policies_applicable', [...form.policies_applicable, '']);
+  const removePolicy = (i)     => set('policies_applicable', form.policies_applicable.filter((_, idx) => idx !== i));
+  const updatePolicy = (i, v)  => set('policies_applicable', form.policies_applicable.map((x, idx) => idx === i ? v : x));
+
+  const addWitness    = ()            => set('witnesses', [...form.witnesses, { name: '', role: '' }]);
+  const removeWitness = (i)           => set('witnesses', form.witnesses.filter((_, idx) => idx !== i));
+  const updateWitness = (i, fld, v)   => set('witnesses', form.witnesses.map((w, idx) => idx === i ? { ...w, [fld]: v } : w));
+  const toggleEvidence = (type) => {
+    const ev = form.evidence_types.includes(type)
+      ? form.evidence_types.filter(t => t !== type)
+      : [...form.evidence_types, type];
+    set('evidence_types', ev);
+  };
+
+  // ── Field highlight helpers ───────────────────────────────────────────────
+  const isLowConf = (f) => low_confidence_fields.includes(f);
+  const isMissing = (f) => missing_fields.includes(f);
+  const isPiiFlag = (f) => output_pii_flags.some(p => p.includes(f));
+
+  // Returns Tailwind border+bg classes for a given field name
+  const inputClass = (fieldName) => {
+    const base = 'w-full border rounded px-3 py-2 text-sm ';
+    if (isPiiFlag(fieldName))  return base + 'border-orange-400 bg-orange-50';
+    if (isLowConf(fieldName))  return base + 'border-yellow-400 bg-yellow-50';
+    if (isMissing(fieldName))  return base + 'border-red-300';
+    return base + 'border-gray-300';
+  };
+
+  // Returns per-row allegation class based on post-output PII flags
+  const allegationRowClass = (i) => {
+    const base = 'flex-1 border rounded px-3 py-2 text-sm ';
+    return output_pii_flags.some(p => p.includes(`allegations[${i}]`))
+      ? base + 'border-orange-400 bg-orange-50'
+      : base + 'border-gray-300';
+  };
+
+  // ── Submit ────────────────────────────────────────────────────────────────
+  // Condition 2: POST /api/cases is UNREACHABLE unless piiConfirmed is true.
+  // Both the button disabled state and this handler enforce the gate independently.
+  const handleSubmit = async () => {
+    if (!piiConfirmed) {
+      setError('You must confirm that all identifying information has been reviewed before this form can be submitted.');
+      return;
+    }
+    if (form.conflict_of_interest) {
+      setError('⚠ Conflict of interest flagged. Case submission blocked. Please reassign the investigator before proceeding.');
+      return;
+    }
+
+    const allegations = form.allegations.filter(a => a.trim());
+    if (!allegations.length)           { setError('At least one allegation is required.'); return; }
+    if (!form.complainant_role.trim()) { setError('Complainant role is required.'); return; }
+    if (!form.respondent_role.trim())  { setError('Respondent role is required.'); return; }
+    if (!form.incident_period.trim())  { setError('Incident period is required.'); return; }
+    if (!form.referring_party.trim())  { setError('Referring party is required.'); return; }
+
+    setError(null);
+    setSubmitting(true);
+    try {
+      const { job_id } = await api('POST', '/api/cases', {
+        case_type:           form.case_type,
+        complainant_name:    form.complainant_name,
+        complainant_role:    form.complainant_role,
+        respondent_name:     form.respondent_name,
+        respondent_role:     form.respondent_role,
+        allegations,
+        witnesses:           form.witnesses.filter(w => w.role.trim()),
+        incident_period:     form.incident_period,
+        referring_party:     form.referring_party,
+        policies_applicable: form.policies_applicable.filter(p => p.trim()),
+        evidence_types:      form.evidence_types,
+        legal_involved:      form.legal_involved,
+      });
+      const result = await pollJob(job_id);
+      if (result && result.status === 'CASE_OPENED') {
+        setView({ name: 'case-view', caseRef: result.case_reference, caseData: result });
+      } else {
+        setError((result && result.message) || JSON.stringify(result));
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (submitting) return <Spinner label="Opening case — running Coordinator Agent, Intake Agent, and Case Management Agent..." />;
+
+  return (
+    <div className="p-6 max-w-3xl mx-auto">
+
+      {/* Header — "Fall back to manual intake" always visible (condition 5) */}
+      <div className="flex items-start justify-between mb-4">
+        <div>
+          <h1 className="text-2xl font-bold">Review Suggested Intake</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            Fields were extracted from the anonymised referral. Review and correct every field before submitting.
+            Real names (complainant, respondent) were not extracted and must be entered manually.
+          </p>
+        </div>
+        <button onClick={onFallback} className="text-sm text-gray-500 hover:text-blue-600 whitespace-nowrap ml-4">
+          ← Manual Intake
+        </button>
+      </div>
+
+      {/* Extraction summary */}
+      {entity_log && Object.values(entity_log).some(v => v > 0) && (
+        <div className="mb-4 p-3 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-600 flex flex-wrap gap-4">
+          <span className="font-medium">Entities anonymised before AI:</span>
+          {Object.entries(entity_log).filter(([, v]) => v > 0).map(([k, v]) => (
+            <span key={k}>{v} {k.replace('_', ' ')}</span>
+          ))}
+        </div>
+      )}
+
+      {/* Field legend */}
+      <div className="mb-4 p-3 bg-white border border-gray-200 rounded-lg text-xs flex flex-wrap gap-4">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-3 h-3 rounded border-2 border-yellow-400 bg-yellow-50"></span>
+          Low confidence — review carefully
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-3 h-3 rounded border-2 border-red-300"></span>
+          Not found in referral — fill in manually
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-3 h-3 rounded border-2 border-orange-400 bg-orange-50"></span>
+          Possible PII — review and remove
+        </span>
+      </div>
+
+      {/* Global PII output warning */}
+      {output_pii_flags.length > 0 && (
+        <div className="mb-4 p-3 bg-orange-50 border border-orange-300 rounded-lg text-sm">
+          <p className="font-semibold text-orange-800 mb-1">⚠ Possible identifying information in AI output</p>
+          <p className="text-orange-700 text-xs">
+            The AI response may contain identifying patterns in the fields highlighted below.
+            Review those fields and remove any real names, contact details, or reference numbers before submitting.
+          </p>
+        </div>
+      )}
+
+      {/* Error banner */}
+      {error && (
+        <div className="mb-4 p-4 bg-red-50 border border-red-300 rounded text-red-700 text-sm whitespace-pre-wrap">
+          {error}
+        </div>
+      )}
+
+      {/* Conflict of Interest */}
+      <section className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6">
+        <h2 className="font-semibold text-amber-800 mb-2">Conflict of Interest Check</h2>
+        <p className="text-sm text-amber-700 mb-3">
+          Before proceeding, confirm the assigned investigator has no conflict of interest with any party.
+        </p>
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input type="checkbox" checked={form.conflict_of_interest}
+            onChange={e => set('conflict_of_interest', e.target.checked)} className="w-4 h-4" />
+          <span className="text-sm text-amber-800 font-medium">
+            A conflict of interest exists — DO NOT PROCEED (reassign investigator first)
+          </span>
+        </label>
+      </section>
+
+      {/* Case Type */}
+      <section className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+        <div className="flex items-center justify-between mb-1">
+          <label className="block text-sm font-medium text-gray-700">Case Type *</label>
+          <FieldBadge field="case_type" low={isLowConf} missing={isMissing} pii={isPiiFlag} />
+        </div>
+        <select value={form.case_type} onChange={e => set('case_type', e.target.value)}
+          className={inputClass('case_type')}>
+          {CASE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+      </section>
+
+      {/* Parties */}
+      <section className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+        <h2 className="font-semibold mb-3">Parties</h2>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Complainant Name (stays local)</label>
+            <input type="text" value={form.complainant_name}
+              onChange={e => set('complainant_name', e.target.value)}
+              placeholder="Full name — enter manually"
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm" />
+            <p className="text-xs text-gray-400 mt-0.5">Not extracted — fill in</p>
+          </div>
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-medium text-gray-600">Complainant Role *</label>
+              <FieldBadge field="complainant_role" low={isLowConf} missing={isMissing} pii={isPiiFlag} />
+            </div>
+            <input type="text" value={form.complainant_role}
+              onChange={e => set('complainant_role', e.target.value)}
+              placeholder="e.g. Senior Manager, Finance"
+              className={inputClass('complainant_role')} />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Respondent Name (stays local)</label>
+            <input type="text" value={form.respondent_name}
+              onChange={e => set('respondent_name', e.target.value)}
+              placeholder="Full name — enter manually"
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm" />
+            <p className="text-xs text-gray-400 mt-0.5">Not extracted — fill in</p>
+          </div>
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-medium text-gray-600">Respondent Role *</label>
+              <FieldBadge field="respondent_role" low={isLowConf} missing={isMissing} pii={isPiiFlag} />
+            </div>
+            <input type="text" value={form.respondent_role}
+              onChange={e => set('respondent_role', e.target.value)}
+              placeholder="e.g. Team Leader, Operations"
+              className={inputClass('respondent_role')} />
+          </div>
+        </div>
+      </section>
+
+      {/* Allegations — individual editable rows, not a text block (condition 9) */}
+      <section className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+        <div className="flex items-center justify-between mb-1">
+          <h2 className="font-semibold">Allegations *</h2>
+          <FieldBadge field="allegations" low={isLowConf} missing={isMissing} pii={isPiiFlag} />
+        </div>
+        {isPiiFlag('allegations') && (
+          <div className="mb-2 p-2 bg-orange-50 border border-orange-300 rounded text-xs text-orange-800">
+            ⚠ One or more allegations may contain identifying information.
+            Review each row and remove any real names, contact details, or reference numbers.
+          </div>
+        )}
+        <p className="text-xs text-gray-400 mb-3">Each allegation is a separate row. Edit, add, or remove as needed.</p>
+        {form.allegations.map((a, i) => (
+          <div key={i} className="flex gap-2 mb-2">
+            <input
+              type="text"
+              value={a}
+              onChange={e => updateAllegation(i, e.target.value)}
+              placeholder={`Allegation ${i + 1}`}
+              className={allegationRowClass(i)}
+            />
+            {form.allegations.length > 1 && (
+              <button onClick={() => removeAllegation(i)}
+                className="px-3 py-2 text-red-500 hover:bg-red-50 rounded text-sm">✕</button>
+            )}
+          </div>
+        ))}
+        <button onClick={addAllegation} className="text-sm text-blue-600 hover:underline mt-1">
+          + Add allegation
+        </button>
+      </section>
+
+      {/* Witnesses */}
+      <section className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+        <h2 className="font-semibold mb-1">Witnesses</h2>
+        {suggestions.witness_count > 0 && (
+          <p className="text-xs text-gray-500 mb-3">
+            AI suggested {suggestions.witness_count} witness{suggestions.witness_count !== 1 ? 'es' : ''}.
+            Roles are pre-filled where available — real names must be entered manually.
+          </p>
+        )}
+        {form.witnesses.map((w, i) => (
+          <div key={i} className="flex gap-2 mb-2">
+            <input type="text" value={w.name}
+              onChange={e => updateWitness(i, 'name', e.target.value)}
+              placeholder="Witness name (stays local)"
+              className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm" />
+            <input type="text" value={w.role}
+              onChange={e => updateWitness(i, 'role', e.target.value)}
+              placeholder="Role"
+              className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm" />
+            <button onClick={() => removeWitness(i)}
+              className="px-3 py-2 text-red-500 hover:bg-red-50 rounded text-sm">✕</button>
+          </div>
+        ))}
+        <button onClick={addWitness} className="text-sm text-blue-600 hover:underline mt-1">
+          + Add witness
+        </button>
+      </section>
+
+      {/* Case Details */}
+      <section className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+        <h2 className="font-semibold mb-3">Case Details</h2>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-medium text-gray-600">Incident Period *</label>
+              <FieldBadge field="incident_period" low={isLowConf} missing={isMissing} pii={isPiiFlag} />
+            </div>
+            <input type="text" value={form.incident_period}
+              onChange={e => set('incident_period', e.target.value)}
+              placeholder="e.g. October–December 2025"
+              className={inputClass('incident_period')} />
+          </div>
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-medium text-gray-600">Referring Party *</label>
+              <FieldBadge field="referring_party" low={isLowConf} missing={isMissing} pii={isPiiFlag} />
+            </div>
+            <input type="text" value={form.referring_party}
+              onChange={e => set('referring_party', e.target.value)}
+              placeholder="e.g. HRBP, Line Manager, Hotline"
+              className={inputClass('referring_party')} />
+          </div>
+        </div>
+      </section>
+
+      {/* Policies */}
+      <section className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-semibold">Applicable Policies</h2>
+          <FieldBadge field="policies_applicable" low={isLowConf} missing={isMissing} pii={isPiiFlag} />
+        </div>
+        {form.policies_applicable.map((p, i) => (
+          <div key={i} className="flex gap-2 mb-2">
+            <input type="text" value={p}
+              onChange={e => updatePolicy(i, e.target.value)}
+              placeholder={`Policy ${i + 1}`}
+              className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm" />
+            {form.policies_applicable.length > 1 && (
+              <button onClick={() => removePolicy(i)}
+                className="px-3 py-2 text-red-500 hover:bg-red-50 rounded text-sm">✕</button>
+            )}
+          </div>
+        ))}
+        <button onClick={addPolicy} className="text-sm text-blue-600 hover:underline mt-1">+ Add policy</button>
+      </section>
+
+      {/* Evidence Types */}
+      <section className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-semibold">Evidence Types Available</h2>
+          <FieldBadge field="evidence_types" low={isLowConf} missing={isMissing} pii={isPiiFlag} />
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {EVIDENCE_TYPES.map(type => (
+            <label key={type} className="flex items-center gap-2 text-sm cursor-pointer">
+              <input type="checkbox" checked={form.evidence_types.includes(type)}
+                onChange={() => toggleEvidence(type)} className="w-4 h-4" />
+              {type}
+            </label>
+          ))}
+        </div>
+      </section>
+
+      {/* Additional Info */}
+      <section className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+        <h2 className="font-semibold mb-3">Additional Information</h2>
+        <label className="flex items-center gap-3 cursor-pointer">
+          <div
+            onClick={() => set('legal_involved', !form.legal_involved)}
+            className={`w-11 h-6 rounded-full transition-colors ${form.legal_involved ? 'bg-blue-600' : 'bg-gray-300'} relative cursor-pointer`}
+          >
+            <div className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-transform ${form.legal_involved ? 'translate-x-6' : 'translate-x-1'}`}></div>
+          </div>
+          <span className="text-sm text-gray-700">
+            Legal already involved
+            {isLowConf('legal_involved') && (
+              <span className="ml-2 text-xs text-yellow-700 bg-yellow-100 px-1.5 py-0.5 rounded">low confidence</span>
+            )}
+          </span>
+        </label>
+      </section>
+
+      {/* Missing fields summary */}
+      {missing_fields.length > 0 && (
+        <div className="mb-4 p-3 bg-gray-50 border border-gray-200 rounded-lg text-sm">
+          <p className="font-medium text-gray-700 mb-1">Fields not found in referral:</p>
+          <p className="text-xs text-gray-500">
+            {missing_fields.join(', ')} — not extractable from the referral. Fill these in manually.
+          </p>
+        </div>
+      )}
+
+      {/* PII confirmation — HARD GATE (condition 2/10) */}
+      <section className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+        <h2 className="font-semibold text-blue-800 mb-2">Confirmation Required Before Submission</h2>
+        <p className="text-sm text-blue-700 mb-3">
+          This form was pre-populated from an AI analysis of anonymised referral text. Before submitting,
+          you must confirm that all fields have been reviewed and corrected.
+        </p>
+        <label className="flex items-start gap-3 cursor-pointer">
+          <input type="checkbox" checked={piiConfirmed}
+            onChange={e => setPiiConfirmed(e.target.checked)} className="w-4 h-4 mt-0.5" />
+          <span className="text-sm text-blue-800 font-medium">
+            I have reviewed all fields above. All identifying information has been reviewed,
+            and no sensitive details remain in the form before submission.
+          </span>
+        </label>
+      </section>
+
+      {/* Action row — "Fall back to manual intake" always present (condition 5) */}
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex gap-3">
+          <button onClick={onRetry}
+            className="px-4 py-2 rounded border border-gray-300 text-sm text-gray-700 hover:bg-gray-50">
+            ← Try Different Input
+          </button>
+          <button onClick={onFallback}
+            className="px-4 py-2 rounded border border-gray-300 text-sm text-gray-700 hover:bg-gray-50">
+            Fall Back to Manual Intake
+          </button>
+        </div>
+        <button
+          onClick={handleSubmit}
+          disabled={form.conflict_of_interest || !piiConfirmed}
+          className={`px-6 py-2.5 rounded-lg font-semibold text-white transition text-sm ${
+            form.conflict_of_interest
+              ? 'bg-gray-400 cursor-not-allowed'
+              : !piiConfirmed
+                ? 'bg-gray-400 cursor-not-allowed'
+                : 'bg-blue-600 hover:bg-blue-700'
+          }`}
+        >
+          {form.conflict_of_interest ? 'Blocked — Conflict of Interest' : !piiConfirmed ? 'Confirm Review to Submit' : 'Open Case'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── FieldBadge — per-field status indicator ───────────────────────────────────
+// Renders inline next to a field label to show its confidence/missing/PII state.
+
+function FieldBadge({ field, low, missing, pii }) {
+  if (pii(field)) return (
+    <span className="text-xs px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 font-medium">
+      ⚠ Possible PII — review
+    </span>
+  );
+  if (low(field)) return (
+    <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700 font-medium">
+      Low confidence
+    </span>
+  );
+  if (missing(field)) return (
+    <span className="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-600 font-medium">
+      Not found
+    </span>
+  );
+  return null;
+}
+
 // ─── App Root ─────────────────────────────────────────────────────────────────
 
 function App() {
@@ -1341,6 +2037,10 @@ function App() {
 
         {view.name === 'new-case' && (
           <NewCaseForm setView={setView} />
+        )}
+
+        {view.name === 'assisted-intake' && (
+          <AssistedIntakeFlow setView={setView} />
         )}
 
         {view.name === 'case-view' && (

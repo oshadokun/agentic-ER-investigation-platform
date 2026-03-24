@@ -43,6 +43,7 @@ app.use('/api/tracker',          require('./api/tracker'));
 app.use('/api/policy-templates', require('./api/policy-templates'));
 app.use('/api/notifications',    require('./api/notifications'));
 app.use('/api/jobs',             require('./api/jobs'));
+app.use('/api/intake-assist',    require('./api/intake-assist'));
 
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'ui', 'index.html')));
 

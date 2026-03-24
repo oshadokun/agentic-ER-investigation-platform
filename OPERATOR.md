@@ -251,3 +251,66 @@ Tests that require Claude API calls (quality review, full document generation) a
 | **No email/Slack notifications** | Deadline notifications appear in the platform UI only. There is no outbound alerting integration. |
 | **PDF page breaks** | The PDF converter renders text sequentially; it does not insert page breaks before section headings. Long documents may have headings at the bottom of a page. |
 | **API cost** | Each document generation call to the Claude API uses tokens. On average, a full Investigation Report costs approximately $0.10-0.30 per generation at current API prices. |
+| **Assisted intake accuracy** | The pre-intake anonymiser is heuristic and pattern-based. It will not catch names written in ALL CAPS, lowercase, or non-standard formats. The investigator confirmation checkbox is the mandatory final gate. |
+| **Assisted intake — PDF not supported** | Assisted intake accepts pasted text, .txt, .md, and .eml files only. PDF reading is not supported in Phase 1. |
+
+---
+
+## 10. Assisted Intake
+
+Assisted intake is an optional workflow that reduces manual data entry when an investigator has a referral document or email to hand.
+
+### How it works
+
+1. Click **+ New Case** in the top menu.
+2. Click **Use Assisted Intake →** in the banner at the top of the form.
+3. Paste referral text or upload a `.txt`, `.md`, or `.eml` file.
+4. Click **Extract & Analyse Referral**.
+5. The system performs two local steps **before any AI call**:
+   - **Local extraction** — strips file format syntax (Markdown, email headers) to get clean plain text.
+   - **Pre-intake anonymisation** — detects and replaces emails, phone numbers, postcodes, NI numbers, organisation names (with legal suffix), and Title Case name sequences with placeholders (`[PERSON 1]`, `[ORG 1]`, etc.).
+6. If obvious PII survives replacement (e.g. a compact email address or mobile number), the request is blocked with a clear message. The investigator must edit the text before retrying.
+7. The anonymised text is sent to Claude, which returns a structured JSON intake suggestion.
+8. The **Review** form appears, pre-populated with suggestions. Fields are colour-coded:
+   - **Yellow border** — low confidence (AI was uncertain; review carefully)
+   - **Red border / "Not found"** — field could not be extracted; must be filled manually
+   - **Orange border / "⚠ Possible PII"** — the AI output contained a pattern that looks like identifying information; review and remove before submitting
+9. Real names (complainant, respondent) are **never extracted or pre-populated**. The investigator must enter them manually.
+10. A mandatory confirmation checkbox must be checked before submission is possible. This is enforced at the code level — the POST /api/cases call cannot be reached without it.
+11. Clicking **Open Case** submits through the same path as manual intake. No case is created before this point.
+
+### Supported input formats
+
+| Format | Notes |
+|---|---|
+| Pasted text | Any length up to 2 MB |
+| `.txt` | Returned as-is |
+| `.md` | Markdown syntax stripped; text content preserved |
+| `.eml` | MIME headers stripped; text/plain body extracted; quoted-printable decoded; multipart handled |
+| `.pdf` | **Not supported** — use copy/paste instead |
+
+### Anonymisation boundary
+
+The anonymisation boundary is the same as manual intake:
+
+```
+raw referral text
+  → local extraction       (server memory only)
+  → pre-intake anonymisation  (server memory only — raw text discarded after this step)
+  → Claude API call (anonymised text only)
+  → structured JSON suggestion
+  → investigator review form
+  → investigator confirms + submits
+  → POST /api/cases (same path as manual intake)
+```
+
+Raw referral text is **never** written to the database, case folders, log files, or audit events.
+
+### Failure handling
+
+If extraction or AI structuring fails, the system always offers two options:
+
+1. **Retry with different input** — edit the text and try again
+2. **Fall back to manual intake** — opens the standard form with no pre-populated data
+
+The investigator is never left in a dead-end state.
